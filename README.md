@@ -96,7 +96,9 @@ Erweiterungen (z. B. PowerUps, Level-System, Animationen) sind geplant.
 
 Ein Student, zwei ECTS, drei Tastenanschläge – und das Semester ist (fast) gerettet.
 Oder um es in Pythons Worten zu sagen:
- if semester.over():
+
+
+if semester.over():
     print("Game Over")
 else:
     print("Level geschafft 🎓")
