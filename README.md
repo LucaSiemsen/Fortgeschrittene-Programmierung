@@ -2,7 +2,7 @@
 
 **Fortgeschrittene Programmierung – HS Flensburg (Wintersemester 2025)**  
 Projektarbeit von **Team 23**  
-👨‍💻 Luca Siemsen · Aaron Lehrke · Corinna Filipp · Dimitri Homutov
+👨‍💻 Luca Siemsen (939491) · Aaron Lehrke (937367) · Corinna Filipp (946691) · Dimitri Homutov (935939)
 
 ---
 
