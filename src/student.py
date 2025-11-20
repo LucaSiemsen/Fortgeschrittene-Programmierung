@@ -1,44 +1,48 @@
 # ============================================================
-# student.py – Spielfigur
-# Kann: bewegen, graben, antworten, sammeln, PowerUps nutzen.
+# student.py – Unsere Spielfigur
+# Kann: bewegen, graben, sammeln, Fragen beantworten
 # ============================================================
 
-from .entity import Entity, GridPos, Direction
-from .level import GRID_W, GRID_H
-from .block import Block
-from .enemy import Enemy
-from .collectibles import Collectible
-from .powerups import PowerUp
+from .graphics import Sprite
 
-class Student(Entity):
-    def __init__(self, pos: GridPos):
-        super().__init__(pos, speed=10.0)
-        self.diggingSpeed = 1.0
-        self.answersBuffer = 0
-        self.invulnerableUntil = 0.0
-        self.hasPizzaShield = False
-        self.stunnedUntil = 0.0
-        # Callbacks (damit Collectibles ECTS gutschreiben können)
-        self.on_gain_ects = None  # wird im Game gesetzt
+class Student:
 
-    def move(self, dir_):
-        nx = max(0, min(GRID_W - 1, self.position.x + dir_[0]))
-        ny = max(0, min(GRID_H - 1, self.position.y + dir_[1]))
-        self.position = GridPos(nx, ny)
+    def __init__(self, gx, gy, tile_size):
+        self.gx = gx
+        self.gy = gy
+        self.tile_size = tile_size
 
-    def dig(self, level) -> None:
-        b: Block = level.blocks[self.position.x][self.position.y]
-        if not b.isDestroyed:
-            b.destroy()
+        self.sprite = Sprite("assets/sprites/student.png", tile_size)
 
-    def answer(self, target: Enemy) -> None:
-        # simple Kampflogik – später erweitern (ChatGPT-Boost etc.)
-        target.takeAnswer()
-        if self.answersBuffer > 0:
-            self.answersBuffer -= 1
+        # PowerUps
+        self.has_pizza_shield = False
 
-    def collect(self, item: Collectible) -> None:
-        item.onPickUp(self)
+    @property
+    def pos(self):
+        return self.gx, self.gy
 
-    def use(self, power: PowerUp) -> None:
-        power.applyTo(self)
+    def move(self, dx, dy, level):
+        """Bewegt den Spieler einen Schritt UND gräbt automatisch."""
+
+        nx = self.gx + dx
+        ny = self.gy + dy
+
+        if not level.in_bounds(nx, ny):
+            return
+
+        # block freigraben
+        tile = level.tiles[nx][ny]
+        tile.dig()
+
+        # bewegen
+        self.gx, self.gy = nx, ny
+
+        # pickups / fragen prüfen
+        level.check_collect(nx, ny)
+        level.check_question(nx, ny)
+        level.check_enemy_collision(nx, ny)
+
+    def draw(self, surf, ox, oy):
+        px = ox + self.gx * self.tile_size
+        py = oy + self.gy * self.tile_size
+        self.sprite.draw(surf, px, py)

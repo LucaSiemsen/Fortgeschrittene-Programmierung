@@ -1,40 +1,95 @@
 # ============================================================
-# powerups.py – PowerUp-Basis + konkrete Effekte
-# EnergyDrink: nächste Antwort automatisch (answersBuffer += 1)
-# ChatGPT: Klausur nur 1 Antwort (hier als Flag am Student)
-# Pizza: 1x Rettung (Flag) + optionaler Slowdown (später)
-# Party: 50/50 invuln (5s) oder stun (5s)
+# powerups.py – kleine Helferlein im Studentenleben
+# ------------------------------------------------------------
+# PowerUps im Spiel:
+#   - Pizza   : Ein Treffer vom Prof wird einmal ignoriert
+#   - Party   : Zeitbuff oder -debuff (random ±10s)
+#   - ChatGPT : gibt dir sofort 1 ECTS
+#
+# Wichtig: Die eigentliche Wirkung findet hier statt. Das
+# Level ruft nur apply_to(level, student) auf und bekommt
+# einen kleinen Text zurück, den wir im HUD anzeigen.
 # ============================================================
 
-import random
-import time
-from .collectibles import Collectible
+from __future__ import annotations
 
-class PowerUp(Collectible):
-    def applyTo(self, student) -> None:
-        raise NotImplementedError
+from enum import Enum, auto
+from typing import TYPE_CHECKING
 
-    def onPickUp(self, student) -> None:
-        self.applyTo(student)
+import pygame
 
-class EnergyDrink(PowerUp):
-    def applyTo(self, student) -> None:
-        student.answersBuffer = min(3, getattr(student, "answersBuffer", 0) + 1)
+if TYPE_CHECKING:
+    from .level import Level
+    from .entities import Student
 
-class ChatGPT(PowerUp):
-    def applyTo(self, student) -> None:
-        # Einfaches Flag – Auswertung später in der Kampf-Logik
-        student.chatgptBoostUntil = time.time() + 10.0  # 10s „Boost“
 
-class Pizza(PowerUp):
-    def applyTo(self, student) -> None:
-        student.hasPizzaShield = True
-        # Optional: Slowdown nach Rettung wird später aktiviert.
+class PowerUpType(Enum):
+    PIZZA = auto()
+    PARTY = auto()
+    CHATGPT = auto()
 
-class Party(PowerUp):
-    def applyTo(self, student) -> None:
-        now = time.time()
-        if random.random() < 0.5:
-            student.invulnerableUntil = max(getattr(student, "invulnerableUntil", 0.0), now + 5.0)
-        else:
-            student.stunnedUntil = max(getattr(student, "stunnedUntil", 0.0), now + 5.0)
+
+class PowerUp:
+    def __init__(self, grid_x: int, grid_y: int, tile_size: int, ptype: PowerUpType):
+        self.grid_x = grid_x
+        self.grid_y = grid_y
+        self.tile_size = tile_size
+        self.ptype = ptype
+
+    # --------------------------------------------------------
+    # Zeichnen
+    # --------------------------------------------------------
+    def draw(self, screen: pygame.Surface, offset_x: int, offset_y: int) -> None:
+        px = offset_x + self.grid_x * self.tile_size
+        py = offset_y + self.grid_y * self.tile_size
+        margin = self.tile_size // 6
+
+        if self.ptype == PowerUpType.PIZZA:
+            color = (255, 160, 90)   # orange
+        elif self.ptype == PowerUpType.PARTY:
+            color = (180, 80, 200)   # lila
+        else:  # CHATGPT
+            color = (80, 220, 180)   # türkis
+
+        rect = pygame.Rect(
+            px + margin,
+            py + margin,
+            self.tile_size - 2 * margin,
+            self.tile_size - 2 * margin,
+        )
+        pygame.draw.rect(screen, color, rect)
+
+    # --------------------------------------------------------
+    # Wirkung
+    # --------------------------------------------------------
+    def apply_to(self, level: "Level", student: "Student") -> str:
+        """
+        Wird vom Level aufgerufen, wenn der Student auf dem Feld landet.
+        Gibt einen kurzen Text zurück, den wir im HUD anzeigen können.
+        """
+
+        if self.ptype == PowerUpType.PIZZA:
+            student.has_pizza_shield = True
+            return "Pizza: Ein Treffer vom Prof wird ignoriert. 🍕"
+
+        if self.ptype == PowerUpType.PARTY:
+            # Party kann gut oder schlecht sein
+            import random
+
+            delta = random.choice([-10.0, +10.0])
+            # Zeit clampen, damit es nicht negativ wird
+            level.timer.time_left = max(
+                5.0, min(level.timer.duration, level.timer.time_left + delta)
+            )
+            if delta > 0:
+                return "Party gut geplant: +10s BAföG-Zeit! 🎉"
+            else:
+                return "Party etwas eskaliert: -10s BAföG-Zeit… 😵"
+
+        if self.ptype == PowerUpType.CHATGPT:
+            level.collected_ects += 1
+            # Level prüft selbst, ob genug ECTS erreicht wurden
+            return "ChatGPT hilft dir bei der Klausur: +1 ECTS. 🤖"
+
+        # Fallback
+        return ""

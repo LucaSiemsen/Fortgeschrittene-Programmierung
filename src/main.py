@@ -1,4 +1,7 @@
-# Kleiner, sauberer Einstiegspunkt – startet nur das Game.
+# ============================================================
+# main.py – Kleiner Einstiegspunkt fürs Spiel
+# ============================================================
+
 from .game import Game
 
 if __name__ == "__main__":

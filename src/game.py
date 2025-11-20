@@ -1,192 +1,380 @@
-# ============================================================
-# game.py – Hauptlogik von "Dig Or Exma"
-# ------------------------------------------------------------
-# Was hier passiert:
-#  - Steuerung: EIN Feld pro Tastendruck (kein „zu weites Rutschen“)
-#  - Bewegung == Graben: Wenn vor mir Erde ist, buddle ich mich rein
-#  - ECTS einsammeln (HUD zählt mit)
-#  - Gegner (Dozent/Klausur) als Platzhalter
-#    -> Kontakt = Game Over (erstmal knallhart, später Pizza/Invuln etc.)
-#  - BAföG-Timer läuft mit
-#  - Zeichnen von Raster, Student, ECTS, Gegnern und HUD
-# ============================================================
+# game.py
+# ----------------------------------------------------------
+# Game-Controller:
+#  - kümmert sich um Menü, Spiel, Frage-Dialoge
+#  - hält Level, Student und rendert alles
+# ----------------------------------------------------------
 
-import pygame as pg
-from .level import Level, GRID_W, GRID_H
-from .entity import GridPos, Direction, TILE
-from .student import Student
-from .enemy import Dozent, Klausur  # Gegnertypen kommen aus enemy.py
+from __future__ import annotations
+
+import sys
+from enum import Enum, auto
+
+import pygame
+
+from .config import (
+    GRID_COLS,
+    GRID_ROWS,
+    GRID_MARGIN_X_TILES,
+    GRID_MARGIN_Y_TILES,
+    REQUIRED_ECTS,
+)
+from .graphics import Sprite
+from .entities import Student
+from .level import Level
+
+
+
+class GameState(Enum):
+    MENU = auto()
+    RUNNING = auto()
+    QUESTION = auto()
+    GAME_OVER = auto()
+    LEVEL_COMPLETE = auto()
+
 
 class Game:
     def __init__(self):
-        # Level 1 (ECTS-Ziel + Startzeit kann ich hier schnell tweaken)
-        self.level = Level(idx=1, required_ects=2, start_time=30)
+        pygame.init()
 
-        # Student spawnt sichtbar links oben
-        self.student = Student(GridPos(2, 2))
-        # Callback: Wenn der Student ECTS einsackt, erhöht Game den Fortschritt
-        self.student.on_gain_ects = self.gain_ects
+        # Vollbild-Fenster
+        self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+        self.info = pygame.display.Info()
+        self.width, self.height = self.info.current_w, self.info.current_h
+        pygame.display.set_caption("Dig Or Exma – Team 23")
 
-        # Damit der Start nicht „eingemauert“ ist, mache ich das Startfeld frei
-        self.level.blocks[self.student.position.x][self.student.position.y].destroy()
+        self.clock = pygame.time.Clock()
 
-        # ECTS-Positionen – minimaler Demo-Spawn (passt zum Ziel 2/2)
-        # (später: zufällig generieren oder aus Leveldatei laden)
-        self.ects_positions = {(6, 4), (12, 8)}
+        # Tile-Größe anhand der Bildschirmgröße bestimmen
+        max_tile_w = self.width // (GRID_COLS + 2 * GRID_MARGIN_X_TILES)
+        max_tile_h = self.height // (GRID_ROWS + 2 * GRID_MARGIN_Y_TILES)
+        self.tile_size = min(max_tile_w, max_tile_h)
 
-        # Gegner-Spawns – rein statisch für den ersten Prototyp
-        self.enemies = [
-            Dozent(GridPos(8, 4)),      # „leichter“ Gegner (1 HP – hier egal)
-            Klausur(GridPos(14, 10)),   # „härter“ (5 HP – hier auch egal)
-        ]
+        # Offset, damit das Grid zentriert ist
+        self.grid_offset_x = (self.width - GRID_COLS * self.tile_size) // 2
+        self.grid_offset_y = (self.height - GRID_ROWS * self.tile_size) // 2
 
-        # Zustände für schöne Meldungen
-        self.is_game_over = False
-        self.game_over_reason = ""
+        # Hintergrundbild
+        bg = pygame.image.load("assets/sprites/Background.png").convert()
+        self.background = pygame.transform.scale(bg, (self.width, self.height))
 
-    # ------------------------------------------------------------
-    # Hilfsfunktion: Student-Fortschritt erhöhen
-    # ------------------------------------------------------------
-    def gain_ects(self, value: int) -> None:
-        self.level.collectedECTS += value
+        # Blöcke (Boden / Tunnel)
+        self.block_solid = Sprite(
+            "assets/sprites/Buchblock-1.png", self.tile_size, self.tile_size
+        )
+        self.block_empty = Sprite(
+            "assets/sprites/leerer block.png", self.tile_size, self.tile_size
+        )
 
-    # ------------------------------------------------------------
-    # Hilfsfunktion: Game Over setzen (friert Input/Logik nicht ein,
-    # aber zeigt halt deutlich an, warum Schluss ist)
-    # ------------------------------------------------------------
-    def game_over(self, reason: str) -> None:
-        self.is_game_over = True
-        self.game_over_reason = reason
+        # Student-Sprite
+        student_img = pygame.image.load("assets/sprites/student.png").convert_alpha()
+        student_img = pygame.transform.scale(
+            student_img, (self.tile_size, self.tile_size)
+        )
 
-    # ------------------------------------------------------------
-    # Kernbewegung: EIN Feld pro Tastendruck – und dabei „graben“
-    # Idee: Wenn Zielfeld noch Erde hat, zerstöre es und zieh rein.
-    # So fühlt sich Bewegen automatisch wie Buddeln an (klassisch).
-    # ------------------------------------------------------------
-    def try_step(self, direction: tuple[int, int]) -> None:
-        if self.is_game_over:
-            return  # Nach Game Over nichts mehr verschieben
+        # Fonts
+        self.font_small = pygame.font.SysFont(None, 26)
+        self.font_big = pygame.font.SysFont(None, 48)
+        self.font_title = pygame.font.SysFont(None, 64)
 
-        cx, cy = self.student.position.x, self.student.position.y
-        nx = max(0, min(GRID_W - 1, cx + direction[0]))
-        ny = max(0, min(GRID_H - 1, cy + direction[1]))
+        # Game-Objekte
+        self.state = GameState.MENU
+        self.level: Level | None = None
+        self.student: Student | None = None
 
-        # Wenn das Zielfeld noch nicht frei ist: „graben“
-        target_block = self.level.blocks[nx][ny]
-        if not target_block.isDestroyed:
-            target_block.destroy()  # erstes Betreten räumt die Erde weg
+        # Frage-Dialog
+        self.active_prof = None
+        self.active_question = None
+        self.last_question_feedback: str | None = None
 
-        # Und dann reinbewegen (falls ich eh an der Kante war, bleib ich halt)
-        self.student.position = GridPos(nx, ny)
+        # Student-Instanz anlegen (Startposition im Grid)
+        self._create_level_and_student()
 
-        # Direkt nach dem Schritt: Kollision mit Gegnern prüfen
-        self.check_enemy_contact()
+    # ------------------------------------------------------
+    # Setup
+    # ------------------------------------------------------
 
-    # ------------------------------------------------------------
-    # Gegnerkontakt prüfen – gleiche Zelle => Game Over
-    # (später: Pizza/Invulnerability hier berücksichtigen)
-    # ------------------------------------------------------------
-    def check_enemy_contact(self) -> None:
-        for enemy in self.enemies:
-            if (enemy.position.x, enemy.position.y) == (self.student.position.x, self.student.position.y):
-                # Dozent vs. Klausur – einfach unterschiedliche Begründung
-                if isinstance(enemy, Dozent):
-                    self.game_over("Vom Dozenten erwischt.")
-                else:
-                    self.game_over("Bei der Klausur durchgefallen.")
-                break
+    def _create_level_and_student(self) -> None:
+        self.level = Level(self.tile_size)
+        # Startposition links oben im Tunnel (gefühlt „von oben ins Level“)
+        start_x, start_y = 1, 1
+        student_img = pygame.image.load("assets/sprites/student.png").convert_alpha()
+        student_img = pygame.transform.scale(
+            student_img, (self.tile_size, self.tile_size)
+        )
+        self.student = Student(start_x, start_y, self.tile_size, student_img)
+        # Startfeld freigraben
+        self.level.tiles[start_x][start_y].dig()
 
-    # ------------------------------------------------------------
-    # Hauptspielschleife
-    # ------------------------------------------------------------
-    def run(self):
-        pg.init()
-        pg.display.set_caption("Dig Or Exma – Prototyp")
+    def restart(self) -> None:
+        self._create_level_and_student()
+        self.state = GameState.RUNNING
+        self.last_question_feedback = None
 
-        # Fenster auf Rastergröße
-        W, H = GRID_W * TILE, GRID_H * TILE
-        screen = pg.display.set_mode((W, H))
-        clock = pg.time.Clock()
-        font = pg.font.SysFont(None, 22)
+    # ------------------------------------------------------
+    # Hauptschleife
+    # ------------------------------------------------------
 
+    def run(self) -> None:
         running = True
+
         while running:
-            dt = clock.tick(60) / 1000.0  # Sekunden seit letztem Frame
+            dt = self.clock.tick(60) / 1000.0  # Sekunden seit letztem Frame
 
-            # ---------- Eingaben ----------
-            for e in pg.event.get():
-                if e.type == pg.QUIT:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
                     running = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        running = False
+                    self.handle_key(event.key)
 
-                elif e.type == pg.KEYDOWN:
-                    # Graben auf dem aktuellen Feld (macht Tunnel sichtbar)
-                    if e.key == pg.K_g:
-                        self.level.blocks[self.student.position.x][self.student.position.y].destroy()
-
-                    # Ein Feld pro Tastendruck – mit Auto-Buddeln ins Zielfeld
-                    elif e.key == pg.K_UP:
-                        self.try_step(Direction.UP)
-                    elif e.key == pg.K_DOWN:
-                        self.try_step(Direction.DOWN)
-                    elif e.key == pg.K_LEFT:
-                        self.try_step(Direction.LEFT)
-                    elif e.key == pg.K_RIGHT:
-                        self.try_step(Direction.RIGHT)
-
-            # ---------- Logik ----------
-            if not self.is_game_over:
+            # Logik-Update
+            if self.state == GameState.RUNNING and self.level is not None:
                 self.level.update(dt)
+                if self.level.is_game_over:
+                    self.state = GameState.GAME_OVER
+                elif self.level.is_won:
+                    self.state = GameState.LEVEL_COMPLETE
 
-                # ECTS einsammeln, wenn ich drauf stehe
-                pos_tuple = (self.student.position.x, self.student.position.y)
-                if pos_tuple in self.ects_positions:
-                    self.ects_positions.remove(pos_tuple)
-                    self.gain_ects(1)
+            # Zeichnen
+            self.draw()
 
-                # (Optional: wenn Level fertig ist, könnte man hier direkt next level triggern)
-                # if self.level.isCleared(): self.next_level()
+        pygame.quit()
+        sys.exit()
 
-            # ---------- Render ----------
-            screen.fill((18, 18, 24))
+    # ------------------------------------------------------
+    # Input
+    # ------------------------------------------------------
 
-            # Boden / Wände (Braun = Erde, Grau = gegraben)
-            for x in range(GRID_W):
-                for y in range(GRID_H):
-                    r = pg.Rect(x * TILE, y * TILE, TILE - 1, TILE - 1)
-                    color = (100, 70, 40) if not self.level.blocks[x][y].isDestroyed else (60, 60, 60)
-                    pg.draw.rect(screen, color, r)
+    def handle_key(self, key: int) -> None:
+        if self.state == GameState.MENU:
+            if key in (pygame.K_SPACE, pygame.K_RETURN):
+                self.restart()
+        elif self.state == GameState.RUNNING:
+            assert self.level is not None and self.student is not None
 
-            # ECTS – kleine gelbe Kästchen
-            for ex, ey in self.ects_positions:
-                pg.draw.rect(screen, (240, 200, 60),
-                             pg.Rect(ex * TILE + 4, ey * TILE + 4, TILE - 8, TILE - 8))
+            if key == pygame.K_r:
+                self.restart()
+                return
 
-            # Gegner – rot (Dozent) und dunkelrot (Klausur), nur als Platzhalter
-            for enemy in self.enemies:
-                col = (220, 80, 80) if isinstance(enemy, Dozent) else (180, 40, 40)
-                pg.draw.rect(screen, col,
-                             pg.Rect(enemy.position.x * TILE, enemy.position.y * TILE, TILE - 2, TILE - 2))
+            dx, dy = 0, 0
+            if key == pygame.K_UP:
+                dy = -1
+            elif key == pygame.K_DOWN:
+                dy = 1
+            elif key == pygame.K_LEFT:
+                dx = -1
+            elif key == pygame.K_RIGHT:
+                dx = 1
 
-            # Student – grün
-            pg.draw.rect(screen, (50, 220, 90),
-                         pg.Rect(self.student.position.x * TILE, self.student.position.y * TILE, TILE - 2, TILE - 2))
+            if dx != 0 or dy != 0:
+                prof = self.student.move(dx, dy, self.level)
+                if prof is not None:
+                    self.open_question(prof)
 
-            # HUD
-            hud = font.render(
-                f"Zeit: {int(self.level.timer.secondsLeft)}s   "
-                f"ECTS: {self.level.collectedECTS}/{self.level.requiredECTS}",
-                True, (230, 230, 230)
+        elif self.state == GameState.QUESTION:
+            # Antwortauswahl: 1/2/3
+            if key in (pygame.K_1, pygame.K_2, pygame.K_3):
+                answer_index = {pygame.K_1: 0, pygame.K_2: 1, pygame.K_3: 2}[key]
+                self.resolve_question(answer_index)
+
+        elif self.state in (GameState.GAME_OVER, GameState.LEVEL_COMPLETE):
+            if key == pygame.K_r:
+                self.restart()
+            elif key in (pygame.K_SPACE, pygame.K_RETURN):
+                self.state = GameState.MENU
+
+    # ------------------------------------------------------
+    # Frage-Dialog
+    # ------------------------------------------------------
+
+    def open_question(self, prof) -> None:
+        assert self.level is not None
+        question = self.level.get_question_for_prof(prof)
+        if question is None:
+            return
+        self.active_prof = prof
+        self.active_question = question
+        self.state = GameState.QUESTION
+        self.last_question_feedback = None
+
+    def resolve_question(self, given_index: int) -> None:
+        assert self.level is not None and self.active_prof is not None
+        q = self.active_question
+        if q is None:
+            self.state = GameState.RUNNING
+            return
+
+        if given_index == q.correct:
+            # richtige Antwort => 2 ECTS als Belohnung
+            self.level.collected_ects += 2
+            self.last_question_feedback = (
+                "Richtige Antwort! +2 ECTS. " + q.explanation
             )
-            screen.blit(hud, (8, 6))
+            # Professor verschwindet aus dem Level
+            self.level.remove_professor(self.active_prof)
+        else:
+            # falsche Antwort => Zeitstrafe
+            self.level.timer.time_left = max(
+                5.0, self.level.timer.time_left - 10.0
+            )
+            self.last_question_feedback = (
+                "Nicht ganz richtig... -10s BAföG-Zeit. " + q.explanation
+            )
 
-            # Zustandsmeldungen (freundlich, damit man weiß, was passiert ist)
-            if self.is_game_over:
-                msg = font.render(f"Game Over – {self.game_over_reason}", True, (255, 120, 120))
-                screen.blit(msg, (W // 2 - 150, H // 2))
-            elif self.level.isCleared():
-                msg = font.render("Level geschafft! 🎓", True, (120, 255, 120))
-                screen.blit(msg, (W // 2 - 110, H // 2))
+        # Aufräumen
+        self.active_prof = None
+        self.active_question = None
 
-            pg.display.flip()
+        # Siegbedingung könnte durch ECTS gestiegen sein
+        if self.level.collected_ects >= REQUIRED_ECTS and not self.level.is_game_over:
+            self.level.is_won = True
+            self.state = GameState.LEVEL_COMPLETE
+        else:
+            self.state = GameState.RUNNING
 
-        pg.quit()
+    # ------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------
+
+    def draw(self) -> None:
+        self.screen.blit(self.background, (0, 0))
+
+        if self.state == GameState.MENU:
+            self.draw_menu()
+        else:
+            assert self.level is not None and self.student is not None
+            self.draw_game()
+
+        pygame.display.flip()
+
+    def draw_menu(self) -> None:
+        title = self.font_title.render("Dig Or Exma", True, (255, 255, 255))
+        subtitle = self.font_small.render(
+            "Ein Student, fünf ECTS und ein gnadenloser BAföG-Timer.",
+            True,
+            (230, 230, 230),
+        )
+        hint = self.font_small.render(
+            "LEERTASTE / ENTER: Starten   |   ESC: Beenden",
+            True,
+            (230, 230, 230),
+        )
+        cx = self.width // 2
+        cy = self.height // 2
+        self.screen.blit(title, title.get_rect(center=(cx, cy - 80)))
+        self.screen.blit(subtitle, subtitle.get_rect(center=(cx, cy - 30)))
+        self.screen.blit(hint, hint.get_rect(center=(cx, cy + 40)))
+
+    def draw_game(self) -> None:
+        assert self.level is not None and self.student is not None
+
+        # Grid/Blöcke
+        for x in range(self.level.cols):
+            for y in range(self.level.rows):
+                tile = self.level.tiles[x][y]
+                px = self.grid_offset_x + x * self.tile_size
+                py = self.grid_offset_y + y * self.tile_size
+                rect = pygame.Rect(px, py, self.tile_size - 1, self.tile_size - 1)
+                if tile.is_solid:
+                    # braune "Buch-Erde"
+                    pygame.draw.rect(self.screen, (100, 70, 40), rect)
+                    self.block_solid.draw(self.screen, px, py)
+                else:
+                    # freier Tunnel
+                    pygame.draw.rect(self.screen, (60, 60, 60), rect)
+                    self.block_empty.draw(self.screen, px, py)
+
+        # ECTS
+        for ects in self.level.ects_items:
+            ects.draw(self.screen, self.grid_offset_x, self.grid_offset_y)
+
+        # Professoren
+        for prof in self.level.professors:
+            prof.draw(self.screen, self.grid_offset_x, self.grid_offset_y)
+
+        # Student
+        self.student.draw(self.screen, self.grid_offset_x, self.grid_offset_y)
+
+        # HUD
+        self.draw_hud()
+
+        # ggf. Frage-Overlay / GameOver-Overlay
+        if self.state == GameState.QUESTION:
+            self.draw_question_overlay()
+        elif self.state == GameState.GAME_OVER:
+            self.draw_center_message(
+                "Game Over",
+                self.level.game_over_reason,
+                "R: Neustart   |   ENTER: Zurück ins Menü",
+                (255, 120, 120),
+            )
+        elif self.state == GameState.LEVEL_COMPLETE:
+            self.draw_center_message(
+                "Level geschafft! 🎓",
+                "Du hast genug ECTS gesammelt.",
+                "R: Neustart   |   ENTER: Zurück ins Menü",
+                (120, 255, 120),
+            )
+
+    def draw_hud(self) -> None:
+        assert self.level is not None
+        hud = self.font_small.render(
+            f"Zeit: {int(self.level.timer.time_left)}s   "
+            f"ECTS: {self.level.collected_ects}/{REQUIRED_ECTS}",
+            True,
+            (255, 255, 255),
+        )
+        self.screen.blit(hud, (20, 20))
+
+        controls = self.font_small.render(
+            "Pfeiltasten: bewegen/graben   |   R: Restart   |   ESC: Beenden",
+            True,
+            (255, 255, 255),
+        )
+        self.screen.blit(controls, (20, 50))
+
+        if self.last_question_feedback:
+            msg = self.font_small.render(
+                self.last_question_feedback, True, (200, 255, 200)
+            )
+            self.screen.blit(msg, (20, self.height - 40))
+
+    def draw_question_overlay(self) -> None:
+        assert self.active_question is not None
+
+        # halbtransparenter dunkler Hintergrund
+        overlay = pygame.Surface((self.width, self.height))
+        overlay.set_alpha(200)
+        overlay.fill((0, 0, 0))
+        self.screen.blit(overlay, (0, 0))
+
+        q = self.active_question
+        lines = [q.text] + [
+            f"{i+1}) {ans}" for i, ans in enumerate(q.answers)
+        ]
+        lines.append("Wähle mit 1 / 2 / 3")
+
+        cx = self.width // 2
+        cy = self.height // 2 - 80
+
+        for i, text in enumerate(lines):
+            surf = self.font_small.render(text, True, (255, 255, 255))
+            self.screen.blit(surf, surf.get_rect(center=(cx, cy + i * 30)))
+
+    def draw_center_message(
+        self,
+        title: str,
+        line1: str,
+        line2: str,
+        color_title: tuple[int, int, int],
+    ) -> None:
+        cx = self.width // 2
+        cy = self.height // 2
+        surf_title = self.font_big.render(title, True, color_title)
+        surf_line1 = self.font_small.render(line1, True, (255, 255, 255))
+        surf_line2 = self.font_small.render(line2, True, (255, 255, 255))
+        self.screen.blit(surf_title, surf_title.get_rect(center=(cx, cy - 40)))
+        self.screen.blit(surf_line1, surf_line1.get_rect(center=(cx, cy)))
+        self.screen.blit(surf_line2, surf_line2.get_rect(center=(cx, cy + 30)))
